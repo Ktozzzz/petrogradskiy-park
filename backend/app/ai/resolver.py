@@ -24,6 +24,20 @@ CANDIDATES_SQL = (
     "SELECT id, name, latitude, longitude, 'place' AS kind FROM geo_places"
 )
 
+# Слова-типы объектов: сами по себе они не указывают на конкретный объект
+# («Летний сад» и «Таврический сад» оба содержат «сад»). Падежные формы
+# сопоставляются тем же префиксным сравнением _same.
+_GENERIC_STEMS = (
+    "сад", "сквер", "парк", "бульвар", "аллея", "площадь", "площадка",
+    "набережная", "проспект", "улица", "переулок", "шоссе", "линия",
+    "остров", "город", "район", "метро", "станция",
+)
+
+
+def _is_generic(token):
+    """Слово — лишь тип объекта, а не его имя («сад», «парка», «сквера»…)."""
+    return any(_same(token, stem) for stem in _GENERIC_STEMS)
+
 
 def _tokens(value):
     value = (value or "").lower().replace("ё", "е")
@@ -58,16 +72,26 @@ def _same(word_a, word_b):
 
 
 def match_score(query, candidate):
-    """Оценка совпадения падежной формы запроса с названием объекта."""
+    """Оценка совпадения падежной формы запроса с названием объекта.
+
+    Совпадение только через слова-типы объектов («сад», «сквер», «парк»…)
+    не считается найденным объектом: иначе запросы «Летний сад» и
+    «Таврический сад» совпали бы с первым попавшимся садом — у них
+    общим остаётся лишь слово «сад», и обе точки резолвятся в один парк.
+    """
     query_tokens = _significant(query)
     cand_tokens = _significant(candidate)
     if not query_tokens or not cand_tokens:
         return 0.0
     matched = 0
+    distinctive = False
     for cand_token in cand_tokens:
-        if any(_same(cand_token, query_token) for query_token in query_tokens):
+        hits = [q for q in query_tokens if _same(cand_token, q)]
+        if hits:
             matched += 1
-    if not matched:
+            if any(not _is_generic(q) for q in hits):
+                distinctive = True
+    if not matched or not distinctive:
         return 0.0
     score = matched + matched / float(len(cand_tokens))
     if _same(cand_tokens[0], query_tokens[0]):
