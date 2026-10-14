@@ -1,5 +1,6 @@
 # Backend: FastAPI + PostGIS. Контекст сборки -- корень проекта.
-FROM python:3.11-slim
+# 3.12 -- версия, на которой тестировался проект; pyproj==3.8.0 требует >=3.12.
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
