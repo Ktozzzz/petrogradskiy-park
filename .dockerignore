@@ -1,0 +1,16 @@
+# Не тащим в контекст сборки локальное окружение и артефакты зависимостей.
+.venv
+venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+.git
+.gitignore
+.env
+**/.env
+frontend/node_modules
+**/frontend/node_modules
+**/.vite
+**/.cache
+*.zip

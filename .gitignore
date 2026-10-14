@@ -1,0 +1,27 @@
+# Локальное окружение и артефакты Python
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+site-packages/
+
+# Секреты (переменные окружения, DSN базы данных)
+.env
+**/.env
+
+# Артефакты фронтенда (node_modules не коммитим; dist КОММИТИМ -- он нужен для Docker-сборки)
+frontend/node_modules/
+**/frontend/node_modules/
+# !frontend/dist -- dist намеренно включён в репозиторий (см. DEPLOY.md)
+
+# Редакторы / ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Архивы
+*.zip

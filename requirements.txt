@@ -1,0 +1,13 @@
+fastapi==0.124.4
+uvicorn[standard]==0.32.1
+SQLAlchemy==2.0.51
+GeoAlchemy2==0.17.0
+psycopg[binary]==3.2.3
+pydantic==2.10.6
+requests==2.32.3
+python-dotenv==1.0.1
+pytest==8.3.4
+httpx==0.28.1
+# ETL: геометрия и метрические расчёты (scripts/import_data.py)
+shapely==2.2.0
+pyproj==3.8.0

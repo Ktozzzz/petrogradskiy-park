@@ -1,0 +1,22 @@
+# Render Blueprint: постоянный бесплатный деплой (пошагово — см. DEPLOY.md).
+#
+# Важно: базу данных ЗДЕСЬ не создаём. Бесплатная база Render удаляется примерно
+# через 30 дней, поэтому используется внешний Neon (бессрочно бесплатный PostGIS),
+# а строка подключения DATABASE_URL задаётся вручную при создании Blueprint.
+services:
+  - type: web
+    name: petrogradsky-parks
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # Строка Neon в SQLAlchemy-формате (postgresql+psycopg://...?sslmode=require).
+      # Render спросит её при создании Blueprint (sync: false -> ввод в дашборде).
+      - key: DATABASE_URL
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
