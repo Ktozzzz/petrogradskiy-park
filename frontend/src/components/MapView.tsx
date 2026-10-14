@@ -273,7 +273,17 @@ export default function MapView(props: Props) {
       ([lon, lat]) => [lat, lon] as [number, number],
     );
     if (latlngs.length < 2) return;
-    L.polyline(latlngs, { color: "#1565c0", weight: 5, opacity: 0.9 }).addTo(layers.route);
+    // Цвет линии зависит от режима: пешком — синий, машина — оранжевый,
+    // транспорт — бирюзовый; приближённый маршрут (пеший ориентир вместо ОТ)
+    // показываем пунктиром, чтобы не выдавать его за точный.
+    const routeColor =
+      route.costing === "auto" ? "#ef6c00" : route.costing === "transit" ? "#00695c" : "#1565c0";
+    L.polyline(latlngs, {
+      color: routeColor,
+      weight: 5,
+      opacity: 0.9,
+      dashArray: route.approximate ? "10 8" : undefined,
+    }).addTo(layers.route);
     const start = latlngs[0];
     const finish = latlngs[latlngs.length - 1];
     L.marker(start, {

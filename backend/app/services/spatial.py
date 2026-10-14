@@ -174,18 +174,45 @@ def search_poi(db, q, limit=20):
     )
 
 
-def poi_near(db, latitude, longitude, radius_m=None, limit=10):
+def poi_by_type(db, poi_type, limit=20):
+    """Точки интереса одного типа по всему району (без привязки к центру).
+
+    Нужно для запросов вида «где поесть», «кафе», когда нет точки отсчёта:
+    возвращает, например, все места питания (food) внутри объектов проекта.
+    """
+    return _rows(
+        db,
+        """
+        SELECT %s
+        FROM poi i
+        JOIN parks p ON p.id = i.park_id
+        WHERE i.poi_type = :poi_type
+        ORDER BY p.name, i.name NULLS LAST, i.id
+        LIMIT :limit
+        """
+        % POI_COLUMNS,
+        {"poi_type": poi_type, "limit": limit},
+    )
+
+
+def poi_near(db, latitude, longitude, radius_m=None, limit=10, poi_type=None):
     """Интересные локации рядом с точкой.
 
     radius_m=None  -> KNN (ближайшие limit штук, индекс GiST);
-    radius_m=X     -> точный отбор в радиусе (ST_DWithin + geography).
+    radius_m=X     -> точный отбор в радиусе (ST_DWithin + geography);
+    poi_type       -> ограничение по типу (например, только «еда»/food).
     """
+    type_filter = ""
+    if poi_type:
+        type_filter = "AND i.poi_type = :poi_type"
     params = {
         "lon": longitude,
         "lat": latitude,
         "limit": limit,
         "deg": point_degrees_tolerance(radius_m or 3000),
     }
+    if poi_type:
+        params["poi_type"] = poi_type
     if radius_m is None:
         return _rows(
             db,
@@ -195,11 +222,12 @@ def poi_near(db, latitude, longitude, radius_m=None, limit=10):
                    ST_Distance(i.geometry::geography, __POINT__::geography) AS distance_m
             FROM poi i
             JOIN parks p ON p.id = i.park_id
+            WHERE TRUE %s
             ORDER BY i.geometry <-> __POINT__
             LIMIT :limit
             """
                 .replace("__POINT__", POINT)
-                % POI_COLUMNS
+                % (POI_COLUMNS, type_filter)
             ),
             params,
         )
@@ -209,11 +237,11 @@ def poi_near(db, latitude, longitude, radius_m=None, limit=10):
         (
             """
         WITH cand AS (
-            SELECT %s,
+            SELECT {cols},
                    ST_Distance(i.geometry::geography, __POINT__::geography) AS distance_m
             FROM poi i
             JOIN parks p ON p.id = i.park_id
-            WHERE ST_DWithin(i.geometry, __POINT__, :deg)
+            WHERE ST_DWithin(i.geometry, __POINT__, :deg) {type_filter}
         )
         SELECT * FROM cand
         WHERE distance_m <= :radius
@@ -221,7 +249,7 @@ def poi_near(db, latitude, longitude, radius_m=None, limit=10):
         LIMIT :limit
         """
             .replace("__POINT__", POINT)
-            % POI_COLUMNS
+            .format(cols=POI_COLUMNS, type_filter=type_filter)
         ),
         params,
     )

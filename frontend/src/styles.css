@@ -383,8 +383,9 @@ html, body, #root {
   transform: translateX(-50%);
   z-index: 1001;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -392,6 +393,11 @@ html, body, #root {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
   font-size: 13px;
   max-width: calc(100% - 24px);
+}
+.route-panel .route-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .route-panel .route-info { color: var(--text, #263238); }
 .route-panel button {
@@ -404,6 +410,52 @@ html, body, #root {
   white-space: nowrap;
 }
 .route-panel button:hover { background: #dfe5e8; }
+
+/* выбор режима маршрута: пешком / на машине / общественный транспорт */
+.route-modes {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+.route-panel .route-mode {
+  flex: 0 0 auto;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+.route-panel .route-mode.active {
+  background: #1565c0;
+  border-color: #1565c0;
+  color: #fff;
+}
+.route-panel .route-mode.active:hover { background: #0d47a1; }
+.route-panel .route-mode:disabled { opacity: 0.55; cursor: wait; }
+
+/* пояснение к маршруту (например, о недоступности данных ОТ) */
+.route-notice {
+  color: #8d6e00;
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* ссылка на Яндекс Карты: настоящее расписание общественного транспорта */
+.route-yandex {
+  display: block;
+  text-align: center;
+  color: #c62828;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid #ef9a9a;
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: #ffebee;
+  white-space: nowrap;
+}
+.route-yandex:hover { background: #ffcdd2; }
 
 .route-btn {
   display: block;
@@ -435,7 +487,7 @@ html, body, #root {
 
 .map-container.picking { cursor: crosshair; }
 
-/* ---------- �������� ������� ---------- */
+/* ---------- �������� ������� ---------- */
 .park-photo {
   display: block;
   width: 100%;
@@ -492,7 +544,7 @@ html, body, #root {
 
 .kv a { color: var(--accent-dark); word-break: break-all; }
 
-/* ������ �������� � ���������� ������� � ������� */
+/* ������ �������� � ���������� ������� � ������� */
 .poi-route {
   border: 1px solid var(--border);
   background: #fff;
@@ -505,7 +557,7 @@ html, body, #root {
 }
 .poi-route:hover { border-color: #1565c0; color: #1565c0; }
 
-/* ---------- ����� ������ (ErrorBoundary) ---------- */
+/* ---------- ����� ������ (ErrorBoundary) ---------- */
 .fatal {
   min-height: 100vh;
   display: flex;

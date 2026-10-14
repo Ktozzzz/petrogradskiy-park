@@ -278,4 +278,10 @@ export interface RouteResponse {
   duration_s: number | null;
   /** Роутер, построивший путь по дорожной сети (Valhalla либо OSRM). */
   source: "valhalla" | "osrm";
+  /** Запрошенный режим маршрута. */
+  costing: "pedestrian" | "bicycle" | "auto" | "transit";
+  /** True — геометрия приблизительная (пеший ориентир вместо маршрута ОТ). */
+  approximate?: boolean;
+  /** Пояснение к ответу (например, об недоступности данных ОТ). */
+  notice?: string | null;
 }

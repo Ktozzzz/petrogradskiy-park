@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
 """Построение маршрута до выбранного объекта.
 
-Один endpoint `/api/route` принимает две точки (старт и финиш) и возвращает
+Один endpoint `/api/route` принимает две точки (старт и финиш), запрошенный
+режим (пешком / велосипед / автомобиль / общественный транспорт) и возвращает
 ломаную (GeoJSON LineString), расстояние и ориентировочное время.
 
-Маршрут строится только по дорожной сети (пеший профиль):
+Маршрут строится только по дорожной сети:
     1) публичный инстанс Valhalla от OpenStreetMap;
-    2) запасной роутер OSRM (routing.openstreetmap.de).
+    2) запасной роутер OSRM (routing.openstreetmap.de) — пеший/вело/авто.
+
+Режим «общественный транспорт»: сперва пробуется OSM-транзит Valhalla
+(costing=transit, данные OSM, без API-ключей). Публичный инстанс сейчас
+не отдаёт транспортные данные для Санкт-Петербурга, поэтому при неудаче
+строится пеший маршрут-ориентир, а в ответе передаётся notice с просьбой
+точное расписание посмотреть в Яндекс Картах (ссылка строится на клиенте).
 
 Оба роутера привязывают (snap) точки к ближайшей дорожной сети, но этого
 недостаточно: точка посреди Невской губы может приклеиться к паромному
@@ -21,6 +28,7 @@
 import json
 import logging
 import math
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
@@ -43,6 +51,11 @@ MAX_SNAP_M = 400.0
 # Средняя скорость пешего движения (м/с) — для оценки времени в пути,
 # если роутер не вернул duration.
 WALK_SPEED_M_S = 1.35
+# Предупреждение, когда маршрут ОТ не удалось построить и показан пеший ориентир.
+TRANSIT_FALLBACK_NOTICE = (
+    "Маршрут общественного транспорта по данным OpenStreetMap сейчас недоступен — "
+    "показан пеший ориентир. Точное расписание и маршрут ОТ смотрите в Яндекс Картах."
+)
 
 
 class RouteRequest(BaseModel):
@@ -50,7 +63,7 @@ class RouteRequest(BaseModel):
     start_lon: float = Field(..., ge=-180, le=180)
     end_lat: float = Field(..., ge=-90, le=90)
     end_lon: float = Field(..., ge=-180, le=180)
-    costing: str = Field("pedestrian", pattern="^(pedestrian|bicycle|auto)$")
+    costing: str = Field("pedestrian", pattern="^(pedestrian|bicycle|auto|transit)$")
 
 
 class RouteResponse(BaseModel):
@@ -58,6 +71,9 @@ class RouteResponse(BaseModel):
     distance_m: float
     duration_s: Optional[float] = None
     source: str                         # "valhalla" | "osrm" (роутер дорожной сети)
+    costing: str = "pedestrian"         # запрошенный режим маршрута
+    approximate: bool = False           # True — геометрия приблизительная (пеший ориентир)
+    notice: Optional[str] = None        # пояснение к ответу (например, про ОТ)
 
 
 def _haversine_m(a, b):
@@ -126,6 +142,13 @@ def _valhalla_route(start, end, costing):
         "costing_options": {costing: {"use_ferry": 0}},
         "directions_options": {"units": "kilometers"},
     }
+    if costing == "transit":
+        # Для транзитных маршрутов Valhalla требует время поездки.
+        # Москва и Санкт-Петербург — UTC+3 без перехода на летнее время.
+        payload["date_time"] = {
+            "type": "depart",
+            "time": (datetime.utcnow() + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M"),
+        }
     # Публичный инстанс Valhalla принимает POST с JSON-телом (GET с ?json=
     # отклоняется кодом 400).
     resp = requests.post(
@@ -258,51 +281,79 @@ ROUTERS = (
     ("valhalla", _valhalla_route),
     ("osrm", _osrm_route),
 )
+# Общественный транспорт: только Valhalla (costing=transit, данные OSM).
+# У OSRM нет профиля ОТ — молчаливый пеший маршрут нельзя выдавать
+# за транспортный.
+TRANSIT_ROUTERS = (("valhalla", _valhalla_route),)
 
 
 @router.post("/route", response_model=RouteResponse)
 def build_route(req: RouteRequest):
-    """Маршрут от точки старта до выбранного объекта (пеший по умолчанию).
+    """Маршрут от точки старта до выбранного объекта (пешком/на машине/ОТ).
 
     Маршрут строится только по дорожной сети. Точки, которые роутеры не смогли
     привязать к сети ближе чем на MAX_SNAP_M (обычно это вода: Нева, залив,
     Невская губа), дают HTTP 422 с понятным сообщением. Если роутеры
     недоступны — HTTP 502. Линии «по прямой» через воду не бывает.
+
+    Для costing=transit сперва пробуется OSM-транзит (Valhalla); если данные
+    ОТ недоступны, строится пеший маршрут-ориентир с notice в ответе.
     """
     start = (req.start_lon, req.start_lat)
     end = (req.end_lon, req.end_lat)
 
     errors = []
     snap_errors = []
-    for source, router_fn in ROUTERS:
-        try:
-            coords, distance_m, duration_s = router_fn(start, end, req.costing)
-        except Exception as exc:  # noqa: BLE001 - внешний роутер, пробуем следующий
-            logger.warning("Роутер %s недоступен: %s", source, exc)
-            errors.append("%s: %s" % (source, exc))
-            continue
+    notice = None
+    approximate = False
 
-        # Проверка привязки: если роутер приклеил точку дальше MAX_SNAP_M,
-        # маршрут фактически начинается/заканчивается не там, где просил
-        # пользователь (как правило - посреди воды). Такой маршрут не берём.
-        d_start = _haversine_m(coords[0], start)
-        d_end = _haversine_m(coords[-1], end)
-        if d_start > MAX_SNAP_M or d_end > MAX_SNAP_M:
-            msg = ("%s: точка привязана к сети на %.0f м (старт) / %.0f м (финиш)"
-                   % (source, d_start, d_end))
-            logger.warning("Маршрут отклонён: %s", msg)
-            snap_errors.append(msg)
-            continue
+    # План попыток: для транспорта — сначала ОТ по OSM, затем пеший ориентир;
+    # для остальных режимов — один профиль через цепочку роутеров.
+    plan = [req.costing]
+    if req.costing == "transit":
+        plan.append("pedestrian")
 
-        if duration_s is None and req.costing == "pedestrian" and distance_m:
-            duration_s = distance_m / WALK_SPEED_M_S
+    for plan_idx, costing in enumerate(plan):
+        routers = TRANSIT_ROUTERS if costing == "transit" else ROUTERS
+        for source, router_fn in routers:
+            try:
+                coords, distance_m, duration_s = router_fn(start, end, costing)
+            except Exception as exc:  # noqa: BLE001 - внешний роутер, пробуем следующий
+                logger.warning("Роутер %s недоступен (costing=%s): %s",
+                               source, costing, exc)
+                errors.append("%s: %s" % (source, exc))
+                continue
 
-        return RouteResponse(
-            geometry={"type": "LineString", "coordinates": coords},
-            distance_m=round(distance_m, 1),
-            duration_s=round(duration_s) if duration_s is not None else None,
-            source=source,
-        )
+            # Проверка привязки: если роутер приклеил точку дальше MAX_SNAP_M,
+            # маршрут фактически начинается/заканчивается не там, где просил
+            # пользователь (как правило - посреди воды). Такой маршрут не берём.
+            d_start = _haversine_m(coords[0], start)
+            d_end = _haversine_m(coords[-1], end)
+            if d_start > MAX_SNAP_M or d_end > MAX_SNAP_M:
+                msg = ("%s: точка привязана к сети на %.0f м (старт) / %.0f м (финиш)"
+                       % (source, d_start, d_end))
+                logger.warning("Маршрут отклонён: %s", msg)
+                snap_errors.append(msg)
+                continue
+
+            if duration_s is None and costing == "pedestrian" and distance_m:
+                duration_s = distance_m / WALK_SPEED_M_S
+
+            if plan_idx > 0:
+                # Вторая попытка: транзитный маршрут недоступен, это пеший ориентир.
+                approximate = True
+                notice = TRANSIT_FALLBACK_NOTICE
+                logger.info("Транспортный маршрут недоступен, отдан пеший ориентир")
+
+            return RouteResponse(
+                geometry={"type": "LineString", "coordinates": coords},
+                distance_m=round(distance_m, 1),
+                duration_s=round(duration_s) if duration_s is not None else None,
+                source=source,
+                costing=req.costing,
+                approximate=approximate,
+                notice=notice,
+            )
 
     if snap_errors:
         # Роутеры ответили, но ни одна точка не попала в дорожную сеть -

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MapView, { DisplayMode } from "./components/MapView";
 import Sidebar, { View } from "./components/Sidebar";
 import { api } from "./api";
@@ -10,6 +10,20 @@ import {
   Scenario,
   Statistics,
 } from "./types";
+
+export type RouteMode = "pedestrian" | "auto" | "transit";
+
+/** Режимы маршрута: пешком, на машине, общественный транспорт. */
+const ROUTE_MODES: { id: RouteMode; icon: string; label: string; hint: string }[] = [
+  { id: "pedestrian", icon: "🚶", label: "Пешком", hint: "Пеший маршрут по дорожной сети парков" },
+  { id: "auto", icon: "🚗", label: "На машине", hint: "Автомобильный маршрут по дорожной сети" },
+  {
+    id: "transit",
+    icon: "🚌",
+    label: "Транспорт",
+    hint: "Общественный транспорт (данные OpenStreetMap; расписание — в Яндекс Картах)",
+  },
+];
 
 export default function App() {
   const [parks, setParks] = useState<Park[]>([]);
@@ -46,6 +60,14 @@ export default function App() {
   const [pickingStart, setPickingStart] = useState(false);
   const [routeBusy, setRouteBusy] = useState(false);
   const [routeHint, setRouteHint] = useState<string | null>(null);
+  // Режим маршрута: пешком / на машине / общественный транспорт.
+  const [routeMode, setRouteMode] = useState<RouteMode>("pedestrian");
+  // Точка старта — чтобы пересчитывать маршрут при смене режима и строить
+  // ссылку на Яндекс Карты для общественного транспорта.
+  const [routeStart, setRouteStart] = useState<{ lat: number; lon: number } | null>(null);
+  // Реф режима: doRoute вызывается из старых замыканий (колбэк геолокации)
+  // и обязан брать актуальный режим, а не значение на момент создания.
+  const routeModeRef = useRef<RouteMode>("pedestrian");
 
   useEffect(() => {
     (async () => {
@@ -105,16 +127,23 @@ export default function App() {
   const clearRoute = useCallback(() => {
     setRoute(null);
     setRouteDest(null);
+    setRouteStart(null);
     setPickingStart(false);
     setRouteHint(null);
   }, []);
 
   const doRoute = useCallback(
-    async (start: { lat: number; lon: number }, dest: { lat: number; lon: number; name: string }) => {
+    async (
+      start: { lat: number; lon: number },
+      dest: { lat: number; lon: number; name: string },
+      mode: RouteMode = routeModeRef.current,
+    ) => {
       setRouteBusy(true);
+      setRoute(null); // при пересчёте не оставляем старую линию при ошибке
+      setRouteStart(start);
       setRouteHint("Строим маршрут до «" + dest.name + "»…");
       try {
-        const r = await api.route(start.lat, start.lon, dest.lat, dest.lon);
+        const r = await api.route(start.lat, start.lon, dest.lat, dest.lon, mode);
         setRoute(r);
         setPickingStart(false);
         setRouteHint(null);
@@ -127,6 +156,29 @@ export default function App() {
     [],
   );
 
+  // Смена режима маршрута: если маршрут уже построен — пересчитываем его
+  // в новом режиме от той же точки старта.
+  const changeRouteMode = useCallback(
+    (mode: RouteMode) => {
+      routeModeRef.current = mode;
+      setRouteMode(mode);
+      if (!routeBusy && !pickingStart && routeStart && routeDest) {
+        doRoute(routeStart, routeDest, mode);
+      }
+    },
+    [routeBusy, pickingStart, routeStart, routeDest, doRoute],
+  );
+
+  // Официальная ссылка Яндекс Карт: маршрут «общественный транспорт» (rtt=mt)
+  // с точками старта и финиша — настоящее расписание ОТ без API-ключей.
+  const yandexTransitHref = useMemo(() => {
+    if (!routeStart || !routeDest) return null;
+    return (
+      "https://yandex.ru/maps/213/saint-petersburg/?rtext=" +
+      `${routeStart.lat},${routeStart.lon}~${routeDest.lat},${routeDest.lon}&rtt=mt`
+    );
+  }, [routeStart, routeDest]);
+
   const enterPickMode = useCallback((dest: { lat: number; lon: number; name: string }) => {
     setPickingStart(true);
     setRouteHint("Кликните на карте — точка старта маршрута до «" + dest.name + "»");
@@ -136,6 +188,7 @@ export default function App() {
     (dest: { lat: number; lon: number; name: string }) => {
       setRoute(null);
       setRouteDest(dest);
+      setRouteStart(null); // старый старт относится к прошлому маршруту
       setPickingStart(false);
       if (!("geolocation" in navigator)) {
         enterPickMode(dest);
@@ -324,31 +377,61 @@ export default function App() {
         )}
         {(route || pickingStart || routeBusy || routeHint) && (
           <div className="route-panel">
-            {route ? (
-              <>
-                <span className="route-info">
-                  🚶 {route.distance_m < 1000
-                    ? Math.round(route.distance_m) + " м"
-                    : (route.distance_m / 1000).toFixed(2) + " км"}
-                  {route.duration_s != null && <> · ≈ {Math.max(1, Math.round(route.duration_s / 60))} мин</>}
-                  <> · {route.source === "osrm" ? "дорожная сеть OSRM" : "дорожная сеть Valhalla"}</>
-                  {routeDest && <> · до «{routeDest.name}»</>}
-                </span>
-                <button onClick={clearRoute}>Сбросить маршрут</button>
-              </>
-            ) : pickingStart ? (
-              <>
-                <span className="route-info">📍 {routeHint}</span>
-                <button onClick={useMyLocationForRoute}>Моё местоположение</button>
-                <button onClick={clearRoute}>Отмена</button>
-              </>
-            ) : routeBusy ? (
-              <span className="route-info">⏳ {routeHint}</span>
-            ) : (
-              <>
-                <span className="route-info">⚠ {routeHint}</span>
-                <button onClick={clearRoute}>Закрыть</button>
-              </>
+            <div className="route-modes" role="group" aria-label="Режим маршрута">
+              {ROUTE_MODES.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={"route-mode" + (routeMode === m.id ? " active" : "")}
+                  onClick={() => changeRouteMode(m.id)}
+                  disabled={routeBusy}
+                  title={m.hint}
+                >
+                  {m.icon} {m.label}
+                </button>
+              ))}
+            </div>
+            <div className="route-main">
+              {route ? (
+                <>
+                  <span className="route-info">
+                    {route.costing === "auto" ? "🚗" : route.costing === "transit" ? "🚌" : "🚶"}{" "}
+                    {route.distance_m < 1000
+                      ? Math.round(route.distance_m) + " м"
+                      : (route.distance_m / 1000).toFixed(2) + " км"}
+                    {route.duration_s != null && <> · ≈ {Math.max(1, Math.round(route.duration_s / 60))} мин</>}
+                    {route.approximate && <> · пеший ориентир</>}
+                    <> · {route.source === "osrm" ? "дорожная сеть OSRM" : "дорожная сеть Valhalla"}</>
+                    {routeDest && <> · до «{routeDest.name}»</>}
+                  </span>
+                  <button onClick={clearRoute}>Сбросить маршрут</button>
+                </>
+              ) : pickingStart ? (
+                <>
+                  <span className="route-info">📍 {routeHint}</span>
+                  <button onClick={useMyLocationForRoute}>Моё местоположение</button>
+                  <button onClick={clearRoute}>Отмена</button>
+                </>
+              ) : routeBusy ? (
+                <span className="route-info">⏳ {routeHint}</span>
+              ) : (
+                <>
+                  <span className="route-info">⚠ {routeHint}</span>
+                  <button onClick={clearRoute}>Закрыть</button>
+                </>
+              )}
+            </div>
+            {route?.notice && <div className="route-notice">⚠ {route.notice}</div>}
+            {routeMode === "transit" && yandexTransitHref && (
+              <a
+                className="route-yandex"
+                href={yandexTransitHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Маршрут общественного транспорта с расписанием в Яндекс Картах"
+              >
+                🚌 Точное расписание ОТ — в Яндекс Картах →
+              </a>
             )}
           </div>
         )}

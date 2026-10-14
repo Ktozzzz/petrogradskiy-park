@@ -115,6 +115,72 @@ def test_route_snaps_water_start_to_shore():
     assert body["source"] in ("valhalla", "osrm")
 
 
+def test_route_mode_auto():
+    """Режим «на машине» строится по дорожной сети и возвращает режим в ответе."""
+    r = client.post(
+        "/api/route",
+        json={
+            "start_lat": 59.9563,
+            "start_lon": 30.3165,
+            "end_lat": 59.9650,
+            "end_lon": 30.3200,
+            "costing": "auto",
+        },
+    )
+    if r.status_code == 502:
+        pytest.skip("Внешние роутеры недоступны (нет сети)")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["geometry"]["type"] == "LineString"
+    assert body["distance_m"] > 0
+    assert body["costing"] == "auto", "Ответ должен подтверждать запрошенный режим"
+    assert body["source"] in ("valhalla", "osrm")
+
+
+def test_route_mode_transit_fallback():
+    """Режим «общественный транспорт»: OSM-транзит либо пеший ориентир с пометкой.
+
+    Публичный Valhalla сейчас не отдаёт транспортные данные по Петроградскому
+    району — тогда API обязано вернуть пеший ориентир с пометкой approximate
+    и пояснением (notice), а не выдать пеший маршрут за транспортный молча.
+    """
+    r = client.post(
+        "/api/route",
+        json={
+            "start_lat": 59.9563,
+            "start_lon": 30.3165,
+            "end_lat": 59.9650,
+            "end_lon": 30.3200,
+            "costing": "transit",
+        },
+    )
+    if r.status_code == 502:
+        pytest.skip("Внешние роутеры недоступны (нет сети)")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["costing"] == "transit"
+    assert body["distance_m"] > 0
+    assert len(body["geometry"]["coordinates"]) >= 2
+    if body["approximate"]:
+        assert body["notice"], "Приблизительный маршрут обязан сопровождаться пояснением"
+        assert "транспорт" in body["notice"].lower() or "общественн" in body["notice"].lower()
+
+
+def test_route_rejects_unknown_costing():
+    """Неизвестный режим маршрута отклоняется схемой (422), а не игнорируется."""
+    r = client.post(
+        "/api/route",
+        json={
+            "start_lat": 59.9563,
+            "start_lon": 30.3165,
+            "end_lat": 59.9650,
+            "end_lon": 30.3200,
+            "costing": "taxi",
+        },
+    )
+    assert r.status_code == 422
+
+
 def test_openapi_docs():
     r = client.get("/openapi.json")
     assert r.status_code == 200
@@ -410,6 +476,73 @@ def test_query_includes_poi(monkeypatch):
         first = body["poi"][0]
         assert first["poi_type_label"]
         assert first.get("park_name"), "POI должен знать, в каком объекте находится"
+
+
+def _force_rules(client_, monkeypatch):
+    """Отключаем LLM, чтобы разбор запроса не зависел от внешней модели."""
+    from app.ai import service as ai_service
+
+    class _NoLLM:
+        def available(self):
+            return False
+
+        def parse_query(self, _text):
+            return None
+
+    monkeypatch.setattr(ai_service, "get_llm_client", lambda: _NoLLM())
+
+
+@requires_db
+def test_query_food_near_park(monkeypatch):
+    """«Где поесть вкусный суп возле Александровского парка» -> кафе/рестораны.
+
+    Ответ обязан содержать места питания (poi_type=food), а не только парки.
+    """
+    _force_rules(client, monkeypatch)
+    r = client.post(
+        "/api/query",
+        json={"text": "Где поесть вкусный суп возле Александровского парка"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["structured"].get("poi_type") == "food"
+    assert len(body["poi"]) > 0, "Рядом с парком должны найтись места питания"
+    assert all(x["poi_type"] == "food" for x in body["poi"]), (
+        "На запрос «где поесть» в списке не должно быть не-еды: %s"
+        % [x["poi_type"] for x in body["poi"]])
+
+
+@requires_db
+def test_query_food_without_known_location(monkeypatch):
+    """«Где поесть в Петроградском районе» -> места питания по району.
+
+    Раньше потерянный из fallback-рекомендации poi_type давал пустой ответ.
+    """
+    _force_rules(client, monkeypatch)
+    r = client.post(
+        "/api/query",
+        json={"text": "Где поесть в Петроградском районе"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["structured"].get("poi_type") == "food"
+    assert len(body["poi"]) > 0, "По запросу «где поесть» обязаны вернуться места питания"
+    assert all(x["poi_type"] == "food" for x in body["poi"])
+
+
+@requires_db
+def test_query_cafe_near_unresolved_park(monkeypatch):
+    """Кафе рядом с неизвестным объектом: место питания всё равно показываются."""
+    _force_rules(client, monkeypatch)
+    r = client.post(
+        "/api/query",
+        json={"text": "кафе рядом с Екатерининским парком"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["poi"]) > 0, (
+        "Даже если объект не распознан, ответ про кафе не должен быть пустым")
+    assert all(x["poi_type"] == "food" for x in body["poi"])
 
 
 @requires_db

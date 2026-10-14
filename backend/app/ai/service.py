@@ -87,6 +87,13 @@ def interpret(db, user_text, latitude=None, longitude=None):
                 structured = structured.model_copy(update={"location": rules["location"]})
             except AttributeError:  # Pydantic 1.x
                 structured = structured.copy(update={"location": rules["location"]})
+        # Аналогично — тип точек интереса («где поесть» -> food): без него
+        # ответ не содержит кафе/рестораны, хотя правила запрос распознали.
+        if structured.poi_type is None and rules.get("poi_type"):
+            try:
+                structured = structured.model_copy(update={"poi_type": rules["poi_type"]})
+            except AttributeError:  # Pydantic 1.x
+                structured = structured.copy(update={"poi_type": rules["poi_type"]})
 
     return structured, source, warnings
 
@@ -181,7 +188,8 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         res = _resolve_or_clarify(db, structured.location, latitude, longitude)
         rows = spatial.nearby_parks(db, res["lat"], res["lon"], structured.category, limit=limit)
         items = [serializers.distance_item(row) for row in rows]
-        _add_poi(response, lambda: spatial.poi_near(db, res["lat"], res["lon"], None))
+        _add_poi(response, lambda: spatial.poi_near(db, res["lat"], res["lon"], None,
+                                                    poi_type=structured.poi_type))
         response["center"] = _center(res)
         response["results"] = items
         response["count"] = len(items)
@@ -202,7 +210,8 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         rows = spatial.radius_parks(db, res["lat"], res["lon"], radius,
                                     structured.category, limit=limit)
         items = [serializers.distance_item(row) for row in rows]
-        _add_poi(response, lambda: spatial.poi_near(db, res["lat"], res["lon"], radius))
+        _add_poi(response, lambda: spatial.poi_near(db, res["lat"], res["lon"], radius,
+                                                    poi_type=structured.poi_type))
         response["center"] = _center(res)
         response["center"]["radius_m"] = radius
         response["radius_m"] = radius
@@ -224,6 +233,22 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         rows = spatial.search_parks(db, query, limit=limit)
         items = [serializers.distance_item({**row, "distance_m": None}) for row in rows]
         _add_poi(response, lambda: spatial.search_poi(db, query, limit=min(limit, 20)))
+        # Текстовый поиск по всей фразе («Где поесть в Петроградском районе»)
+        # почти никогда не совпадает с названиями POI — для запросов о точках
+        # интереса добавляем локации запрошенного типа: при точке отсчёта —
+        # поблизости, иначе — по всему району.
+        if structured.poi_type and not response.get("poi"):
+            if structured.location is not None:
+                try:
+                    res = _resolve_or_clarify(db, structured.location, latitude, longitude)
+                    _add_poi(response, lambda: spatial.poi_near(
+                        db, res["lat"], res["lon"], None, poi_type=structured.poi_type))
+                except ClarificationError:
+                    _add_poi(response, lambda: spatial.poi_by_type(
+                        db, structured.poi_type, limit=20))
+            else:
+                _add_poi(response, lambda: spatial.poi_by_type(
+                    db, structured.poi_type, limit=20))
         response["results"] = items
         response["count"] = len(items)
         response["text"] = "По запросу «%s» найдено объектов: %d.%s" % (
@@ -234,11 +259,26 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         category = structured.category
         total, rows = spatial.list_parks(db, category=category, limit=limit)
         items = [serializers.distance_item({**row, "distance_m": None}) for row in rows]
+        # Если запрос о точках интереса («где поесть», «кафе»), прикладываем
+        # соответствующие локации: без точки отсчёта — все такого типа в районе,
+        # с точкой — поблизости от неё.
+        if structured.poi_type:
+            if structured.location is not None:
+                try:
+                    res = _resolve_or_clarify(db, structured.location, latitude, longitude)
+                    _add_poi(response, lambda: spatial.poi_near(
+                        db, res["lat"], res["lon"], None, poi_type=structured.poi_type))
+                except ClarificationError:
+                    _add_poi(response, lambda: spatial.poi_by_type(
+                        db, structured.poi_type, limit=20))
+            else:
+                _add_poi(response, lambda: spatial.poi_by_type(
+                    db, structured.poi_type, limit=20))
         response["results"] = items
         response["count"] = total
         label = CATEGORY_LABELS.get(category, category) if category else "все объекты"
-        response["text"] = "Категория «%s»: объектов в районе — %d, показано %d." % (
-            label, total, len(items))
+        response["text"] = "Категория «%s»: объектов в районе — %d, показано %d.%s" % (
+            label, total, len(items), _poi_note(response))
         return response
 
     if intent == "poi_search":
@@ -305,6 +345,24 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         elif latitude is not None and longitude is not None:
             lat, lon, center_name = latitude, longitude, "текущая точка"
 
+        # Интересные локации рядом с точкой отсчёта: при явном запросе
+        # «где поесть» (poi_type=food) показываем места питания, иначе —
+        # ближайшие разные локации. Если точка отсчёта не определилась
+        # (неизвестное название), показываем запрошенный тип локаций
+        # по всему району — ответ про кафе/рестораны всё равно будет.
+        if lat is not None and lon is not None:
+            _add_poi(
+                response,
+                lambda: spatial.poi_near(
+                    db, lat, lon,
+                    structured.radius_meters or 1000,
+                    poi_type=structured.poi_type,
+                ),
+            )
+        elif structured.poi_type:
+            _add_poi(response, lambda: spatial.poi_by_type(
+                db, structured.poi_type, limit=20))
+
         result = recommender.recommend(
             db, structured.text or user_text, lat, lon,
             structured.radius_meters, limit=max(limit, 5),
@@ -315,10 +373,10 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         response["center"] = {"latitude": lat, "longitude": lon, "name": center_name} if lat else None
         if result["results"]:
             best = result["results"][0]
-            response["text"] = "Рекомендации по запросу «%s». Лучший вариант: %s (%s)." % (
-                user_text, best["park"]["name"], best["reason"].lower())
+            response["text"] = "Рекомендации по запросу «%s». Лучший вариант: %s (%s).%s" % (
+                user_text, best["park"]["name"], best["reason"].lower(), _poi_note(response))
         else:
-            response["text"] = "Подходящих объектов не найдено."
+            response["text"] = "Подходящих объектов не найдено.%s" % _poi_note(response)
         return response
 
     raise ClarificationError("Не удалось определить, что нужно выполнить по запросу.")
@@ -360,7 +418,16 @@ def run_query(db, user_text, latitude=None, longitude=None):
         "search", "category_search", "poi_search"
     ):
         try:
-            alt = StructuredQuery(intent="recommend", text=user_text)
+            # Сохраняем тип точек интереса и точку отсчёта исходного запроса,
+            # иначе «Где поесть в Петроградском районе» потеряло бы poi_type=food.
+            alt = StructuredQuery(
+                intent="recommend",
+                text=user_text,
+                poi_type=structured.poi_type,
+                location=structured.location,
+                category=structured.category,
+                radius_meters=structured.radius_meters,
+            )
             alt_response = execute(db, alt, user_text, latitude, longitude, warnings)
             if alt_response.get("count", 0) > 0:
                 alt_response["warnings"] = list(alt_response.get("warnings") or []) + [
