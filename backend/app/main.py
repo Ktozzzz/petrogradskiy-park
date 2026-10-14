@@ -77,6 +77,12 @@ def health():
             "available": llm.available(),
             "model": llm.model,
             "base_url": llm.base_url,
+            # Диагностика (без раскрытия значения ключа):
+            # api_key_set=false -> переменная AI_API_KEY пуста/не задана;
+            # last_check.status=401 -> ключ отклонён провайдером;
+            # last_check.error -> сеть до провайдера недоступна.
+            "api_key_set": bool(llm.api_key),
+            "last_check": {"status": llm.last_status, "error": llm.last_error},
             "mode": "llm + rules fallback" if llm.available() else "rules (GIS-поиск без AI)",
         },
     }

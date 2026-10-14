@@ -93,6 +93,9 @@ class LLMClient:
         self._available = None
         self._checked_at = 0.0
         self._ttl = 30  # секунд между проверками доступности
+        # Диагностика последней проверки /models (для /api/health).
+        self.last_status = None   # HTTP-статус ответа
+        self.last_error = None    # текст сетевого исключения, если было
 
     def _headers(self):
         """Заголовки авторизации.
@@ -113,15 +116,25 @@ class LLMClient:
         try:
             resp = requests.get(
                 self.base_url.rstrip("/") + "/models",
-                timeout=3,
+                timeout=5,
                 headers=self._headers(),
             )
             self._available = resp.status_code == 200
-        except Exception:  # noqa: BLE001
+            self.last_status = resp.status_code
+            self.last_error = None
+        except Exception as exc:  # noqa: BLE001
             self._available = False
+            self.last_status = None
+            self.last_error = ("%s: %s" % (type(exc).__name__, exc))[:200]
         self._checked_at = now
         if not self._available:
-            logger.info("AI-сервис недоступен по адресу %s", self.base_url)
+            logger.info(
+                "AI-сервис недоступен по адресу %s (HTTP %s, ключ %s)%s",
+                self.base_url,
+                self.last_status if self.last_status is not None else "-",
+                "задан" if self.api_key else "НЕ задан",
+                (", ошибка: " + self.last_error) if self.last_error else "",
+            )
         return self._available
 
     def reset_cache(self):
