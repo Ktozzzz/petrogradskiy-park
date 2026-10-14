@@ -85,13 +85,25 @@ def _extract_json(text):
 class LLMClient:
     """Единая точка интеграции с AI-моделью."""
 
-    def __init__(self, base_url=None, model=None, timeout=None):
+    def __init__(self, base_url=None, model=None, timeout=None, api_key=None):
         self.base_url = (base_url or config.AI_BASE_URL).rstrip("/")
         self.model = model or config.AI_MODEL
         self.timeout = timeout or config.AI_TIMEOUT
+        self.api_key = config.AI_API_KEY if api_key is None else api_key
         self._available = None
         self._checked_at = 0.0
         self._ttl = 30  # секунд между проверками доступности
+
+    def _headers(self):
+        """Заголовки авторизации.
+
+        Ключ шлётся только если задан: локальный Ollama и аналоги работают
+        без авторизации, хостинговые провайдеры (Groq, Gemini, OpenRouter)
+        требуют Bearer-токен.
+        """
+        if not self.api_key:
+            return None
+        return {"Authorization": "Bearer " + self.api_key}
 
     # -- доступность ---------------------------------------------------
     def available(self):
@@ -100,7 +112,9 @@ class LLMClient:
             return self._available
         try:
             resp = requests.get(
-                self.base_url.rstrip("/") + "/models", timeout=3
+                self.base_url.rstrip("/") + "/models",
+                timeout=3,
+                headers=self._headers(),
             )
             self._available = resp.status_code == 200
         except Exception:  # noqa: BLE001
@@ -132,6 +146,7 @@ class LLMClient:
                 self.base_url.rstrip("/") + "/chat/completions",
                 json=payload,
                 timeout=self.timeout,
+                headers=self._headers(),
             )
             if resp.status_code != 200:
                 logger.warning("LLM вернул HTTP %s", resp.status_code)

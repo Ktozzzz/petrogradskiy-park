@@ -52,6 +52,9 @@ DATABASE_URL = get("DATABASE_URL", "postgresql+psycopg://postgres@127.0.0.1:5433
 AI_BASE_URL = get("AI_BASE_URL", "http://127.0.0.1:11434/v1")
 AI_MODEL = get("AI_MODEL", "qwen2.5:3b")
 AI_TIMEOUT = get_int("AI_TIMEOUT", 30)
+# Ключ OpenAI-совместимого провайдера (Groq/Gemini/OpenRouter/vLLM и т. п.).
+# Пусто -> авторизация не шлётся (локальный Ollama и аналоги без ключа).
+AI_API_KEY = get("AI_API_KEY", "")
 GEOCODER_URL = get("GEOCODER_URL", "https://nominatim.openstreetmap.org")
 GEOCODER_ENABLED = get("GEOCODER_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 MAP_TILE_URL = get("MAP_TILE_URL", "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png")

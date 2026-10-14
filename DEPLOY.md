@@ -113,22 +113,29 @@ SELECT count(*) FROM poi;        -- ожидается 424
    - **Dockerfile Path**: `backend/Dockerfile`
    - **Build Context / Root Directory**: `.` (корень репозитория; обычно уже по умолчанию)
    - **Instance Type / Plan**: **Free**
-4. В разделе **Environment** добавьте переменную окружения:
+4. В разделе **Environment** добавьте переменные окружения:
    - `DATABASE_URL` — строка Neon **в SQLAlchemy-формате** (обратите внимание на `+psycopg`):
      ```
      postgresql+psycopg://user:password@ep-xxxx.aws.neon.tech/neondb?sslmode=require
      ```
+   - `AI_BASE_URL` = `https://api.groq.com/openai/v1`
+   - `AI_MODEL` = `qwen/qwen3.8-27b`
+   - `AI_API_KEY` = бесплатный ключ Groq: https://console.groq.com → **API Keys** →
+     **Create API Key** (без карты; ключ вида `gsk_...`)
 5. Нажмите **Create Web Service**. Render соберёт Docker-образ и задеплоит (2–4 минуты).
 6. Сайт станет доступен по адресу вида `https://petrogradsky-parks.onrender.com`.
 
-> **AI (Ollama/qwen) на хостинге не нужен.** Без него приложение автоматически
-> переключается на GIS-поиск по правилам: карта, поиск, сценарии и рекомендации работают.
+> **AI на бесплатном хостинге.** Ollama здесь запустить нельзя (free Render — 512 МБ RAM,
+> модели нужно ~2 ГБ), поэтому разбор запросов идёт во внешний бесплатный API **Groq**
+> (OpenAI-совместимый, ключ шлётся только через `AI_API_KEY` и в репозиторий не попадает).
+> Если AI недоступен (нет ключа, закончились лимиты), приложение **автоматически**
+> переключается на GIS-поиск по правилам: карта, поиск, сценарии и рекомендации работают всегда.
 
 ### Альтернатива: Blueprint в один клик
 
 В корне репозитория лежит готовый `render.yaml`. Вместо ручной настройки: на Render
 **New + → Blueprint** → выбрать репозиторий → при создании Render спросит
-`DATABASE_URL`, вставьте значение из шага 4.4.
+`DATABASE_URL` и `AI_API_KEY`, вставьте значения из шага 4.
 
 ---
 

@@ -18,5 +18,14 @@ services:
       # Render спросит её при создании Blueprint (sync: false -> ввод в дашборде).
       - key: DATABASE_URL
         sync: false
+      # AI-разбор запросов: внешний OpenAI-совместимый API (Groq).
+      # AI_API_KEY -- секрет, вводится только в дашборде (sync: false),
+      # в публичный репозиторий не попадает.
+      - key: AI_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: AI_MODEL
+        value: qwen/qwen3.8-27b
+      - key: AI_API_KEY
+        sync: false
       - key: LOG_LEVEL
         value: INFO

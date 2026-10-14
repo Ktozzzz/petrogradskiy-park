@@ -124,10 +124,16 @@ class HttpEmbedder:
         self.name = self.model
 
     def embed(self, text):
+        headers = (
+            {"Authorization": "Bearer " + config.AI_API_KEY}
+            if config.AI_API_KEY
+            else None
+        )
         resp = requests.post(
             self.base_url + "/embeddings",
             json={"model": self.model, "input": text},
             timeout=self.timeout,
+            headers=headers,
         )
         resp.raise_for_status()
         data = resp.json()["data"][0]["embedding"]
