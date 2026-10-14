@@ -20,6 +20,7 @@ from ..models import (
 )
 from ..schemas import schemas
 from ..services import geojson_service, serializers, spatial, stats_service
+from ..services import photos as photos_service
 
 router = APIRouter(prefix="/api", tags=["parks"])
 
@@ -119,15 +120,42 @@ def nearest_distance(
     }
 
 
-@router.get("/parks/search")
+@router.get("/parks/search", response_model=schemas.SearchResponse)
 def search(
     q: str = Query(..., min_length=1, max_length=200),
     limit: int = Query(20, ge=1, le=config.MAX_LIMIT),
     db: Session = Depends(get_db),
 ):
-    """Текстовый поиск по названию, описанию, темам и ключевым словам."""
+    """Текстовый поиск: объекты (парки/сады/скверы) и интересные локации (POI)."""
     rows = spatial.search_parks(db, q, limit=limit)
-    return {"total": len(rows), "items": [_park_out(row) for row in rows]}
+    poi_rows = spatial.search_poi(db, q, limit=min(limit, 20))
+    return {
+        "total": len(rows),
+        "items": [_park_out(row) for row in rows],
+        "poi": [serializers.poi_out(row) for row in poi_rows],
+    }
+
+
+@router.get("/parks/{park_id}/photos", response_model=schemas.ParkPhotosResponse)
+def park_photos(
+    park_id: int,
+    limit: int = Query(6, ge=1, le=12),
+    db: Session = Depends(get_db),
+):
+    """Фотографии объекта (Wikimedia Commons + фото из БД, с кэшем)."""
+    row = spatial.get_park(db, park_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Объект не найден")
+
+    photos = []
+    if row.get("image_url"):
+        photos.append({"url": row["image_url"], "title": None, "page": None})
+    photos.extend(photos_service.search_photos(row["name"], limit=limit))
+    return {
+        "park_id": row["id"],
+        "park_name": row["name"],
+        "photos": photos[:limit],
+    }
 
 
 @router.get("/parks/{park_id}", response_model=schemas.ParkOut)

@@ -44,6 +44,9 @@ class ParkOut(BaseModel):
     is_free: Optional[bool] = None
     working_hours: Optional[str] = None
     website: Optional[str] = None
+    phone: Optional[str] = None
+    image_url: Optional[str] = None
+    year_established: Optional[int] = None
     metro_stations: List[str] = []
     facilities: List[str] = []
     themes: List[str] = []
@@ -54,12 +57,26 @@ class ParkOut(BaseModel):
     poi_count: int = 0
     road_count: int = 0
     exit_count: int = 0
+    osm_id: Optional[int] = None
+    osm_type: Optional[str] = None
     source: str = "OpenStreetMap"
 
 
 class ParkListResponse(BaseModel):
     total: int
     items: List[ParkOut]
+
+
+class ParkPhoto(BaseModel):
+    url: str
+    title: Optional[str] = None
+    page: Optional[str] = None
+
+
+class ParkPhotosResponse(BaseModel):
+    park_id: int
+    park_name: str
+    photos: List[ParkPhoto] = []
 
 
 class NearbyItem(BaseModel):
@@ -103,10 +120,22 @@ class PoiOut(BaseModel):
     park_id: int
     poi_type: str
     poi_type_label: str
+    icon: Optional[str] = None
+    color: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
+    park_name: Optional[str] = None
     latitude: float
     longitude: float
+    distance_m: Optional[float] = None
+
+
+class SearchResponse(BaseModel):
+    """Текстовый поиск: объекты + интересные локации."""
+
+    total: int
+    items: List[ParkOut] = []
+    poi: List[PoiOut] = []
 
 
 class RoadOut(BaseModel):

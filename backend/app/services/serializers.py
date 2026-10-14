@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Сериализация строк БД в ответы API."""
-from ..models import CATEGORY_LABELS, POI_ICONS, POI_LABELS, ROAD_LABELS
+from ..models import CATEGORY_LABELS, POI_COLORS, POI_ICONS, POI_LABELS, ROAD_LABELS
 
 
 def park_out(row):
@@ -18,6 +18,9 @@ def park_out(row):
         "is_free": row.get("is_free"),
         "working_hours": row.get("working_hours"),
         "website": row.get("website"),
+        "phone": row.get("phone"),
+        "image_url": row.get("image_url"),
+        "year_established": row.get("year_established"),
         "metro_stations": list(row.get("metro_stations") or []),
         "facilities": list(row.get("facilities") or []),
         "themes": list(row.get("themes") or []),
@@ -28,6 +31,8 @@ def park_out(row):
         "poi_count": int(row.get("poi_count") or 0),
         "road_count": int(row.get("road_count") or 0),
         "exit_count": int(row.get("exit_count") or 0),
+        "osm_id": row.get("osm_id"),
+        "osm_type": row.get("osm_type"),
         "source": row.get("source") or "OpenStreetMap",
     }
 
@@ -54,10 +59,13 @@ def poi_out(row):
         "poi_type": row["poi_type"],
         "poi_type_label": POI_LABELS.get(row["poi_type"], row["poi_type"]),
         "icon": POI_ICONS.get(row["poi_type"], "•"),
+        "color": POI_COLORS.get(row["poi_type"], "#607d8b"),
         "name": row.get("name"),
         "description": row.get("description"),
+        "park_name": row.get("park_name"),
         "latitude": row["latitude"],
         "longitude": row["longitude"],
+        "distance_m": row.get("distance_m"),
     }
 
 

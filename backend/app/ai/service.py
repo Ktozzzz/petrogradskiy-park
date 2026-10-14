@@ -117,6 +117,27 @@ def _category_summary(rows):
     )
 
 
+def _poi_note(response):
+    """Краткая приписка о найденных интересных локациях для текста ответа."""
+    count = len(response.get("poi") or [])
+    if not count:
+        return ""
+    return " Также найдено интересных локаций: %d." % count
+
+
+def _add_poi(response, fetch_rows, limit=10):
+    """Приложить интересные локации к ответу (не ломает запрос при сбое).
+
+    fetch_rows -- вызываемый без аргументов запрос к БД со списком POI.
+    """
+    try:
+        response["poi"] = [serializers.poi_out(row) for row in fetch_rows()[:limit]]
+    except Exception:  # noqa: BLE001 - POI вторичны относительно основного ответа
+        logger.exception("Не удалось подготовить список точек интереса")
+        response["poi"] = []
+    return response
+
+
 def execute(db, structured, user_text, latitude=None, longitude=None, warnings=None):
     """Исполнить структурированный запрос движком пространственных запросов."""
     warnings = list(warnings or [])
@@ -160,17 +181,19 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         res = _resolve_or_clarify(db, structured.location, latitude, longitude)
         rows = spatial.nearby_parks(db, res["lat"], res["lon"], structured.category, limit=limit)
         items = [serializers.distance_item(row) for row in rows]
+        _add_poi(response, lambda: spatial.poi_near(db, res["lat"], res["lon"], None))
         response["center"] = _center(res)
         response["results"] = items
         response["count"] = len(items)
+        poi_note = _poi_note(response)
         if items:
             response["text"] = (
-                "Найдено %d объектов ближе всего к «%s». Ближайший: %s — %s."
+                "Найдено %d объектов ближе всего к «%s». Ближайший: %s — %s.%s"
                 % (len(items), res.get("name"), items[0]["park"]["name"],
-                   serializers.format_distance(items[0]["distance_m"]))
+                   serializers.format_distance(items[0]["distance_m"]), poi_note)
             )
         else:
-            response["text"] = "По заданным условиям объектов не найдено."
+            response["text"] = "По заданным условиям объектов не найдено." + poi_note
         return response
 
     if intent == "radius_search":
@@ -179,19 +202,20 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         rows = spatial.radius_parks(db, res["lat"], res["lon"], radius,
                                     structured.category, limit=limit)
         items = [serializers.distance_item(row) for row in rows]
+        _add_poi(response, lambda: spatial.poi_near(db, res["lat"], res["lon"], radius))
         response["center"] = _center(res)
         response["center"]["radius_m"] = radius
         response["radius_m"] = radius
         response["results"] = items
         response["count"] = len(items)
         response["text"] = (
-            "В радиусе %s от «%s» найдено %d: %s."
+            "В радиусе %s от «%s» найдено %d: %s.%s"
             % (serializers.format_distance(radius), res.get("name"), len(items),
-               _category_summary(rows) or "нет данных")
+               _category_summary(rows) or "нет данных", _poi_note(response))
         )
         if not items:
-            response["text"] = "В радиусе %s от «%s» объектов не найдено." % (
-                serializers.format_distance(radius), res.get("name"),
+            response["text"] = "В радиусе %s от «%s» объектов не найдено.%s" % (
+                serializers.format_distance(radius), res.get("name"), _poi_note(response),
             )
         return response
 
@@ -199,9 +223,11 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
         query = structured.text or user_text
         rows = spatial.search_parks(db, query, limit=limit)
         items = [serializers.distance_item({**row, "distance_m": None}) for row in rows]
+        _add_poi(response, lambda: spatial.search_poi(db, query, limit=min(limit, 20)))
         response["results"] = items
         response["count"] = len(items)
-        response["text"] = "По запросу «%s» найдено объектов: %d." % (query, len(items))
+        response["text"] = "По запросу «%s» найдено объектов: %d.%s" % (
+            query, len(items), _poi_note(response))
         return response
 
     if intent == "category_search":

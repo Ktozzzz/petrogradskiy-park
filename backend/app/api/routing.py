@@ -4,9 +4,19 @@
 Один endpoint `/api/route` принимает две точки (старт и финиш) и возвращает
 ломаную (GeoJSON LineString), расстояние и ориентировочное время.
 
-Основной источник — публичный инстанс Valhalla от OpenStreetMap (пеший профиль),
-без ключей и регистрации. Если внешний роутер недоступен, возвращаем прямую
-линию (маршрут «по прямой»), чтобы линия всегда рисовалась на карте.
+Маршрут строится только по дорожной сети (пеший профиль):
+    1) публичный инстанс Valhalla от OpenStreetMap;
+    2) запасной роутер OSRM (routing.openstreetmap.de).
+
+Оба роутера привязывают (snap) точки к ближайшей дорожной сети, но этого
+недостаточно: точка посреди Невской губы может приклеиться к паромному
+рейсу или к сети, удалённой на километры. Поэтому результат дополнительно
+проверяется:
+    * маршрут не должен использовать паромы (has_ferry);
+    * старт и финиш не должны быть привязаны дальше MAX_SNAP_M метров.
+Точки посреди воды дают HTTP 422 с понятным сообщением; если роутеры
+недоступны — HTTP 502. Маршрут «по прямой» через Неву или залив
+не рисуется никогда.
 """
 import json
 import logging
@@ -14,13 +24,22 @@ import math
 from typing import Optional
 
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("app.routing")
 router = APIRouter(prefix="/api", tags=["routing"])
 
 VALHALLA_URL = "https://valhalla1.openstreetmap.de/route"
+# Запасной пеший роутер OSRM. Профиль подставляется и в поддомен, и в путь.
+OSRM_URL = "https://routing.openstreetmap.de/routed-{profile}/route/v1/{profile}"
+COSTING_TO_PROFILE = {"pedestrian": "foot", "bicycle": "bike", "auto": "car"}
+ROUTER_TIMEOUT_S = 15
+USER_AGENT = "petrogradsky-parks/1.0"
+# Максимально допустимая привязка (snap) точки к дорожной сети, в метрах.
+# Дальше — маршрут по сути строится не от запрошенной точки (часто это вода:
+# Невская губа, Нева, залив), и мы отказываемся его рисовать.
+MAX_SNAP_M = 400.0
 # Средняя скорость пешего движения (м/с) — для оценки времени в пути,
 # если роутер не вернул duration.
 WALK_SPEED_M_S = 1.35
@@ -38,7 +57,7 @@ class RouteResponse(BaseModel):
     geometry: dict                      # GeoJSON LineString (координаты [lon, lat])
     distance_m: float
     duration_s: Optional[float] = None
-    source: str                         # "valhalla" (реальный) | "straight" (по прямой)
+    source: str                         # "valhalla" | "osrm" (роутер дорожной сети)
 
 
 def _haversine_m(a, b):
@@ -101,6 +120,10 @@ def _valhalla_route(start, end, costing):
             {"lat": end[1], "lon": end[0]},
         ],
         "costing": costing,
+        # Пеший маршрут не должен использовать паромы: паром через Невскую
+        # губу — это и есть «маршрут по воде». (Публичный инстанс опцию
+        # не всегда учитывает, поэтому ниже проверяется и has_ferry.)
+        "costing_options": {costing: {"use_ferry": 0}},
         "directions_options": {"units": "kilometers"},
     }
     # Публичный инстанс Valhalla принимает POST с JSON-телом (GET с ?json=
@@ -110,9 +133,9 @@ def _valhalla_route(start, end, costing):
         data=json.dumps(payload),
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "petrogradsky-parks/1.0",
+            "User-Agent": USER_AGENT,
         },
-        timeout=18,
+        timeout=ROUTER_TIMEOUT_S,
     )
     if resp.status_code != 200 or not resp.text:
         raise RuntimeError("Valhalla HTTP %s: %s"
@@ -141,10 +164,15 @@ def _valhalla_route(start, end, costing):
     # 3) Формат Valhalla по умолчанию: trip.legs[].shape (encoded polyline),
     #    расстояние/время -- в trip.summary (length в км, time в секундах).
     trip = data.get("trip")
+    summary = (trip.get("summary") or {}) if trip else {}
+    # Маршрут с паромом пеший не принимаем — это линия по воде.
+    # Публичный инстанс опцию use_ferry не всегда учитывает, поэтому
+    # проверяем итоговый флаг.
+    if summary.get("has_ferry"):
+        raise RuntimeError("Valhalla построил маршрут через паром (по воде)")
     if not coords and trip:
         legs = trip.get("legs") or []
         shape = "".join(leg.get("shape", "") for leg in legs if leg.get("shape"))
-        summary = trip.get("summary") or {}
         if shape:
             # Точность кодирования подбирается по опорной рамке из summary.
             for precision in (6, 5):
@@ -180,30 +208,121 @@ def _valhalla_route(start, end, costing):
     return coords, float(distance_m), (float(duration_s) if duration_s else None)
 
 
+def _osrm_route(start, end, costing):
+    """Запасной роутер OSRM (routing.openstreetmap.de, пеший профиль).
+
+    Возвращает (coords[[lon,lat], ...], distance_m, duration_s).
+    Точки также привязываются к дорожной сети — по воде линия не пойдёт.
+    """
+    profile = COSTING_TO_PROFILE.get(costing, "foot")
+    url = "%s/%s,%s;%s,%s" % (
+        OSRM_URL.format(profile=profile),
+        start[0], start[1],
+        end[0], end[1],
+    )
+    resp = requests.get(
+        url,
+        params={
+            "overview": "full",
+            "geometries": "geojson",
+            "alternatives": "false",
+            "steps": "false",
+        },
+        headers={"User-Agent": USER_AGENT},
+        timeout=ROUTER_TIMEOUT_S,
+    )
+    if resp.status_code != 200 or not resp.text:
+        raise RuntimeError("OSRM HTTP %s: %s" % (resp.status_code, resp.text[:200]))
+    data = resp.json()
+    if data.get("code") != "Ok":
+        raise RuntimeError("OSRM: %s" % str(data.get("message") or data)[:200])
+    routes = data.get("routes") or []
+    if not routes:
+        raise RuntimeError("OSRM вернул пустой маршрут")
+    route = routes[0]
+    geom = (route.get("geometry") or {})
+    coords = geom.get("coordinates")
+    if not coords or len(coords) < 2:
+        raise RuntimeError("OSRM вернул пустую геометрию: %s" % str(data)[:200])
+    coords = [[float(c[0]), float(c[1])] for c in coords]
+    distance_m = route.get("distance")
+    if distance_m is None:
+        distance_m = _path_length_m(coords)
+    duration_s = route.get("duration")
+    return coords, float(distance_m), (float(duration_s) if duration_s is not None else None)
+
+
+# Роутеры пробуются по очереди: сперва Valhalla, затем OSRM.
+# Каждый строит путь строго по дорожной сети (snap к ближайшей дороге).
+ROUTERS = (
+    ("valhalla", _valhalla_route),
+    ("osrm", _osrm_route),
+)
+
+
 @router.post("/route", response_model=RouteResponse)
 def build_route(req: RouteRequest):
-    """Маршрут от точки старта до выбранного объекта (пеший по умолчанию)."""
+    """Маршрут от точки старта до выбранного объекта (пеший по умолчанию).
+
+    Маршрут строится только по дорожной сети. Точки, которые роутеры не смогли
+    привязать к сети ближе чем на MAX_SNAP_M (обычно это вода: Нева, залив,
+    Невская губа), дают HTTP 422 с понятным сообщением. Если роутеры
+    недоступны — HTTP 502. Линии «по прямой» через воду не бывает.
+    """
     start = (req.start_lon, req.start_lat)
     end = (req.end_lon, req.end_lat)
 
-    coords = None
-    distance_m = None
-    duration_s = None
-    source = "valhalla"
-    try:
-        coords, distance_m, duration_s = _valhalla_route(start, end, req.costing)
-    except Exception as exc:  # noqa: BLE001 - внешний роутер не обязателен
-        logger.warning("Valhalla недоступен, строим по прямой: %s", exc)
-        source = "straight"
-        coords = [[start[0], start[1]], [end[0], end[1]]]
-        distance_m = _path_length_m(coords)
+    errors = []
+    snap_errors = []
+    for source, router_fn in ROUTERS:
+        try:
+            coords, distance_m, duration_s = router_fn(start, end, req.costing)
+        except Exception as exc:  # noqa: BLE001 - внешний роутер, пробуем следующий
+            logger.warning("Роутер %s недоступен: %s", source, exc)
+            errors.append("%s: %s" % (source, exc))
+            continue
 
-    if duration_s is None and req.costing == "pedestrian" and distance_m:
-        duration_s = distance_m / WALK_SPEED_M_S
+        # Проверка привязки: если роутер приклеил точку дальше MAX_SNAP_M,
+        # маршрут фактически начинается/заканчивается не там, где просил
+        # пользователь (как правило - посреди воды). Такой маршрут не берём.
+        d_start = _haversine_m(coords[0], start)
+        d_end = _haversine_m(coords[-1], end)
+        if d_start > MAX_SNAP_M or d_end > MAX_SNAP_M:
+            msg = ("%s: точка привязана к сети на %.0f м (старт) / %.0f м (финиш)"
+                   % (source, d_start, d_end))
+            logger.warning("Маршрут отклонён: %s", msg)
+            snap_errors.append(msg)
+            continue
 
-    return RouteResponse(
-        geometry={"type": "LineString", "coordinates": coords},
-        distance_m=round(distance_m, 1),
-        duration_s=round(duration_s) if duration_s is not None else None,
-        source=source,
+        if duration_s is None and req.costing == "pedestrian" and distance_m:
+            duration_s = distance_m / WALK_SPEED_M_S
+
+        return RouteResponse(
+            geometry={"type": "LineString", "coordinates": coords},
+            distance_m=round(distance_m, 1),
+            duration_s=round(duration_s) if duration_s is not None else None,
+            source=source,
+        )
+
+    if snap_errors:
+        # Роутеры ответили, но ни одна точка не попала в дорожную сеть -
+        # скорее всего, старт или финиш находится на воде.
+        logger.error("Маршрут невозможен (snap): %s", "; ".join(snap_errors))
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Не удалось построить маршрут: точка старта или финиша находится "
+                "на воде либо слишком далеко от дорожной сети. Выберите точку "
+                "на берегу, дороге или тропинке парка."
+            ),
+        )
+
+    logger.error("Ни один роутер не ответил: %s", "; ".join(errors))
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            "Не удалось построить маршрут: сервисы маршрутизации (Valhalla, OSRM) "
+            "временно недоступны. Маршрут по прямой через воду не строится — "
+            "повторите попытку позже."
+        ),
     )

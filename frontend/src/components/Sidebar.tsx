@@ -5,6 +5,8 @@ import {
   DistanceResponse,
   NearestDistanceResponse,
   Park,
+  ParkPhoto,
+  PoiItem,
   QueryResponse,
   RadiusResponse,
   RecommendResponse,
@@ -39,11 +41,14 @@ type Props = {
     center?: { latitude: number; longitude: number },
   ) => void;
   onRouteToPark: (park: Park) => void;
+  /** Маршрут до произвольной точки (интересной локации из поиска). */
+  onRouteToPoint: (lat: number, lon: number, name: string) => void;
 };
 
 export default function Sidebar(p: Props) {
   const [q, setQ] = useState("");
   const [searchResults, setSearchResults] = useState<Park[] | null>(null);
+  const [searchPoi, setSearchPoi] = useState<PoiItem[]>([]);
   const [searching, setSearching] = useState(false);
 
   const doSearch = async () => {
@@ -52,6 +57,7 @@ export default function Sidebar(p: Props) {
     try {
       const res = await api.search(q.trim());
       setSearchResults(res.items);
+      setSearchPoi(res.poi ?? []);
       p.setView("search");
     } catch (e: any) {
       alert("Поиск недоступен: " + (e?.message || e));
@@ -72,7 +78,7 @@ export default function Sidebar(p: Props) {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && doSearch()}
-          placeholder="Поиск: парк, сад, сквер…"
+          placeholder="Поиск: парк, площадка, памятник…"
         />
         <button onClick={doSearch} disabled={searching}>
           {searching ? "…" : "Найти"}
@@ -105,7 +111,9 @@ export default function Sidebar(p: Props) {
           <>
             <h2>Результаты поиска</h2>
             {searchResults === null && <p className="muted">Введите запрос и нажмите «Найти».</p>}
-            {searchResults && searchResults.length === 0 && <p className="muted">Ничего не найдено.</p>}
+            {searchResults && searchResults.length === 0 && searchPoi.length === 0 && (
+              <p className="muted">Ничего не найдено.</p>
+            )}
             {searchResults && searchResults.length > 0 && (
               <ul className="list">
                 {searchResults.map((r) => (
@@ -118,11 +126,27 @@ export default function Sidebar(p: Props) {
                 ))}
               </ul>
             )}
+            {searchPoi.length > 0 && (
+              <>
+                <h3>Интересные локации ({searchPoi.length})</h3>
+                <PoiList
+                  items={searchPoi}
+                  onSelectPark={p.onSelectPark}
+                  onRoute={(x) =>
+                    p.onRouteToPoint(x.latitude, x.longitude, x.name || x.poi_type_label)
+                  }
+                />
+              </>
+            )}
           </>
         )}
 
         {p.view === "park" && p.selectedPark && (
-          <ParkCard park={p.selectedPark} onRoute={() => p.onRouteToPark(p.selectedPark!)} />
+          <ParkCard
+            park={p.selectedPark}
+            onRoute={() => p.onRouteToPark(p.selectedPark!)}
+            onBack={() => p.setView("stats")}
+          />
         )}
 
         {p.view === "nearby" && <NearbyForm onResults={p.onResults} results={p.results} onSelect={p.onSelectPark} />}
@@ -140,6 +164,7 @@ export default function Sidebar(p: Props) {
             scenarios={p.scenarios}
             onResults={p.onResults}
             onSelect={p.onSelectPark}
+            onRouteToPoint={p.onRouteToPoint}
           />
         )}
 
@@ -184,36 +209,139 @@ function catSymbol(code: string) {
 
 /* ------------------------------------------------------------------ */
 
-function ParkCard({ park, onRoute }: { park: Park; onRoute?: () => void }) {
+function ParkCard({
+  park,
+  onRoute,
+  onBack,
+}: {
+  park: Park;
+  onRoute?: () => void;
+  onBack: () => void;
+}) {
+  const [photos, setPhotos] = useState<ParkPhoto[] | null>(null);
+  const [active, setActive] = useState(0);
+
+  // Фотографии объекта (Wikimedia Commons) — грузятся отдельно от карточки.
+  useEffect(() => {
+    let alive = true;
+    setPhotos(null);
+    setActive(0);
+    api
+      .parkPhotos(park.id)
+      .then((r) => alive && setPhotos(r.photos ?? []))
+      .catch(() => alive && setPhotos([]));
+    return () => {
+      alive = false;
+    };
+  }, [park.id]);
+
+  // Поля GeoJSON могут отсутствовать — работаем только с гарантированными.
+  const metro = park.metro_stations ?? [];
+  const facilities = park.facilities ?? [];
+  const themes = park.themes ?? [];
+  const idx = photos && photos.length ? Math.min(active, photos.length - 1) : -1;
+  const photo = idx >= 0 ? photos![idx] : null;
+
+  const yandexUrl =
+    `https://yandex.ru/maps/?ll=${park.longitude},${park.latitude}` +
+    `&z=16&pt=${park.longitude},${park.latitude}`;
+  const osmUrl =
+    park.osm_id && park.osm_type
+      ? `https://www.openstreetmap.org/${park.osm_type}/${park.osm_id}`
+      : `https://www.openstreetmap.org/?mlat=${park.latitude}&mlon=${park.longitude}` +
+        `#map=16/${park.latitude}/${park.longitude}`;
+  const commonsUrl = `https://commons.wikimedia.org/w/index.php?search=${encodeURIComponent(
+    park.name,
+  )}`;
+
   return (
     <>
+      <button className="back" onClick={onBack}>← Назад на главную</button>
       <h2>{park.name}</h2>
+
+      {photos === null ? (
+        <div className="park-photo placeholder">Загружаю фотографии…</div>
+      ) : photo ? (
+        <a
+          href={photo.page || photo.url}
+          target="_blank"
+          rel="noreferrer"
+          title={photo.title || "Открыть фото"}
+        >
+          <img className="park-photo" src={photo.url} alt={park.name} loading="lazy" />
+        </a>
+      ) : (
+        <div className="park-photo placeholder">Фотографий не найдено</div>
+      )}
+      {photos && photos.length > 1 && (
+        <div className="photo-thumbs">
+          {photos.map((ph, i) => (
+            <button
+              key={ph.url}
+              className={i === idx ? "active" : ""}
+              onClick={() => setActive(i)}
+              title={ph.title || ""}
+            >
+              <img src={ph.url} alt="" loading="lazy" />
+            </button>
+          ))}
+        </div>
+      )}
+
       {onRoute && (
         <button className="route-btn" onClick={onRoute}>
           📍 Маршрут до объекта
         </button>
       )}
+
       <table className="kv">
         <tbody>
           <tr><td>Тип</td><td>{park.category_label}</td></tr>
           <tr><td>Район</td><td>{park.borough || "—"}</td></tr>
+          {park.year_established ? (
+            <tr><td>Год основания</td><td>{park.year_established}</td></tr>
+          ) : null}
           <tr><td>Адрес</td><td>{park.address || "—"}</td></tr>
-          <tr><td>Площадь</td><td>{park.area_sqm ? (park.area_sqm / 10000).toFixed(2) + " га" : "—"}</td></tr>
-          <tr><td>Вход</td><td>{park.is_free == null ? "—" : park.is_free ? "Бесплатный" : "Платный"}</td></tr>
+          <tr><td>Площадь</td>
+            <td>{park.area_sqm ? (park.area_sqm / 10000).toFixed(2) + " га" : "—"}</td></tr>
+          <tr><td>Вход</td>
+            <td>{park.is_free == null ? "—" : park.is_free ? "Бесплатный" : "Платный"}</td></tr>
           <tr><td>Часы работы</td><td>{park.working_hours || "—"}</td></tr>
-          <tr><td>Метро</td><td>{park.metro_stations.length ? park.metro_stations.join(", ") : "—"}</td></tr>
+          <tr><td>Телефон</td>
+            <td>{park.phone ? <a href={`tel:${park.phone}`}>{park.phone}</a> : "—"}</td></tr>
+          <tr><td>Сайт</td>
+            <td>
+              {park.website ? (
+                <a href={park.website} target="_blank" rel="noreferrer">{park.website}</a>
+              ) : (
+                "—"
+              )}
+            </td></tr>
+          <tr><td>Метро</td><td>{metro.length ? metro.join(", ") : "—"}</td></tr>
           <tr><td>Описание</td><td>{park.description || "—"}</td></tr>
           <tr><td>POI / дороги / входы</td>
             <td>{park.poi_count} / {park.road_count} / {park.exit_count}</td></tr>
-          {park.facilities.length > 0 && (
-            <tr><td>Объекты</td><td>{park.facilities.slice(0, 12).join(", ")}</td></tr>
+          {facilities.length > 0 && (
+            <tr><td>Объекты</td><td>{facilities.slice(0, 12).join(", ")}</td></tr>
           )}
-          {park.themes.length > 0 && (
-            <tr><td>Темы</td><td>{park.themes.join(", ")}</td></tr>
+          {themes.length > 0 && (
+            <tr><td>Темы</td><td>{themes.join(", ")}</td></tr>
           )}
           <tr><td>Источник</td><td>{park.source}</td></tr>
         </tbody>
       </table>
+
+      <h3>Ссылки и ресурсы</h3>
+      <div className="park-links">
+        <a href={yandexUrl} target="_blank" rel="noreferrer">🗺 Яндекс.Карты</a>
+        <a href={osmUrl} target="_blank" rel="noreferrer">🌍 OpenStreetMap</a>
+        <a href={commonsUrl} target="_blank" rel="noreferrer">🖼 Викисклад (фото)</a>
+        {park.website && (
+          <a href={park.website} target="_blank" rel="noreferrer">🌐 Официальный сайт</a>
+        )}
+      </div>
+
+      <button className="back" onClick={onBack}>← Назад на главную</button>
     </>
   );
 }
@@ -242,6 +370,48 @@ function ResultList({
 function fmt(m: number | null | undefined) {
   if (m == null) return "";
   return m < 1000 ? `${Math.round(m)} м` : `${(m / 1000).toFixed(2)} км`;
+}
+
+/** Список интересных локаций (POI) с переходом к объекту и маршрутом. */
+function PoiList({
+  items,
+  onSelectPark,
+  onRoute,
+}: {
+  items: PoiItem[];
+  onSelectPark?: (id: number) => void;
+  onRoute?: (x: PoiItem) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <ul className="list poi-list">
+      {items.map((x) => (
+        <li key={x.id}>
+          <span className="poi-badge sm" style={{ background: x.color || "#607d8b" }}>
+            {x.icon || "•"}
+          </span>{" "}
+          {onSelectPark ? (
+            <button className="link" onClick={() => onSelectPark(x.park_id)}>
+              {x.name || x.poi_type_label}
+            </button>
+          ) : (
+            x.name || x.poi_type_label
+          )}
+          <span className="muted"> · {x.park_name || x.poi_type_label}</span>
+          {x.distance_m != null && <span className="muted"> · {fmt(x.distance_m)}</span>}
+          {onRoute && (
+            <button
+              className="poi-route"
+              title="Маршрут до локации"
+              onClick={() => onRoute(x)}
+            >
+              📍 Маршрут
+            </button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function NearbyForm(p: {
@@ -495,6 +665,7 @@ function QueryForm(p: {
   scenarios: Scenario[];
   onResults: Props["onResults"];
   onSelect: (id: number) => void;
+  onRouteToPoint: Props["onRouteToPoint"];
 }) {
   const [text, setText] = useState("");
   const [res, setRes] = useState<QueryResponse | null>(null);
@@ -574,16 +745,14 @@ function QueryForm(p: {
           )}
           {res.poi.length > 0 && (
             <>
-              <h3>Найденные точки интереса ({res.poi.length})</h3>
-              <ul className="list">
-                {res.poi.slice(0, 15).map((x) => (
-                  <li key={x.id}>
-                    <span className="poi-badge sm" style={{ background: x.color || "#607d8b" }}>{x.icon || "•"}</span>{" "}
-                    {x.name || x.poi_type_label}
-                    <span className="muted"> · {(x as any).park_name ?? ""}</span>
-                  </li>
-                ))}
-              </ul>
+              <h3>Найденные интересные локации ({res.poi.length})</h3>
+              <PoiList
+                items={res.poi.slice(0, 15)}
+                onSelectPark={p.onSelect}
+                onRoute={(x) =>
+                  p.onRouteToPoint(x.latitude, x.longitude, x.name || x.poi_type_label)
+                }
+              />
             </>
           )}
         </div>

@@ -8,11 +8,13 @@ import type {
   NearbyResponse,
   Park,
   ParkLayers,
+  ParkPhotosResponse,
   QueryResponse,
   RadiusResponse,
   RecommendResponse,
   RouteResponse,
   Scenario,
+  SearchResponse,
   Statistics,
 } from "./types";
 
@@ -57,6 +59,7 @@ export const api = {
   districtsGeoJSON: () => request<FeatureCollection>("/api/districts/geojson"),
 
   park: (id: number) => request<Park>(`/api/parks/${id}`),
+  parkPhotos: (id: number) => request<ParkPhotosResponse>(`/api/parks/${id}/photos`),
   parkLayers: async (id: number): Promise<ParkLayers> => {
     const [poi, roads, exits] = await Promise.all([
       request<{ items: ParkLayers["poi"] }>(`/api/parks/${id}/poi`),
@@ -114,7 +117,7 @@ export const api = {
     }),
 
   search: (q: string, limit = 20) =>
-    request<{ total: number; items: Park[] }>(
+    request<SearchResponse>(
       `/api/parks/search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
 

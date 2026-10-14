@@ -18,11 +18,19 @@ from sqlalchemy import text
 PARK_COLUMNS = """
     p.id, p.name, p.category, p.description, p.address, p.borough,
     p.latitude, p.longitude, p.area_sqm, p.is_free, p.working_hours, p.website,
+    p.phone, p.image_url, p.year_established,
     p.metro_stations, p.facilities, p.themes, p.keywords, p.source,
+    p.osm_id, p.osm_type,
     p.has_poi, p.has_roads, p.has_exits,
     (SELECT count(*) FROM poi i WHERE i.park_id = p.id) AS poi_count,
     (SELECT count(*) FROM park_roads r WHERE r.park_id = p.id) AS road_count,
     (SELECT count(*) FROM park_exits e WHERE e.park_id = p.id) AS exit_count
+"""
+
+# Колонки точек интереса (i) с названием родительского объекта (p).
+POI_COLUMNS = """
+    i.id, i.park_id, i.poi_type, i.name, i.description,
+    i.latitude, i.longitude, i.source, p.name AS park_name
 """
 
 POINT = "ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)"
@@ -131,6 +139,91 @@ def search_parks(db, q, limit=20):
         """
         % PARK_COLUMNS,
         {"q": q, "like": "%" + q + "%", "limit": limit},
+    )
+
+
+def search_poi(db, q, limit=20):
+    """Текстовый поиск по интересным локациям (точки интереса внутри объектов).
+
+    Ищет по названию точки, её описанию и названию родительского объекта,
+    чтобы запрос вида «мост» или «Александровский» находил и сами локации.
+    """
+    return _rows(
+        db,
+        """
+        SELECT %s,
+               GREATEST(
+                   CASE WHEN coalesce(i.name, '') ILIKE :like THEN 0.95 ELSE 0 END,
+                   CASE WHEN coalesce(i.name, '') %% :q THEN 0.70 ELSE 0 END,
+                   CASE WHEN coalesce(i.description, '') ILIKE :like THEN 0.60 ELSE 0 END,
+                   CASE WHEN p.name ILIKE :like THEN 0.50 ELSE 0 END,
+                   CASE WHEN p.name %% :q THEN 0.35 ELSE 0 END
+               ) AS rank
+        FROM poi i
+        JOIN parks p ON p.id = i.park_id
+        WHERE coalesce(i.name, '') %% :q
+           OR coalesce(i.name, '') ILIKE :like
+           OR coalesce(i.description, '') ILIKE :like
+           OR p.name %% :q
+           OR p.name ILIKE :like
+        ORDER BY rank DESC, i.name NULLS LAST, i.id
+        LIMIT :limit
+        """
+        % POI_COLUMNS,
+        {"q": q, "like": "%" + q + "%", "limit": limit},
+    )
+
+
+def poi_near(db, latitude, longitude, radius_m=None, limit=10):
+    """Интересные локации рядом с точкой.
+
+    radius_m=None  -> KNN (ближайшие limit штук, индекс GiST);
+    radius_m=X     -> точный отбор в радиусе (ST_DWithin + geography).
+    """
+    params = {
+        "lon": longitude,
+        "lat": latitude,
+        "limit": limit,
+        "deg": point_degrees_tolerance(radius_m or 3000),
+    }
+    if radius_m is None:
+        return _rows(
+            db,
+            (
+                """
+            SELECT %s,
+                   ST_Distance(i.geometry::geography, __POINT__::geography) AS distance_m
+            FROM poi i
+            JOIN parks p ON p.id = i.park_id
+            ORDER BY i.geometry <-> __POINT__
+            LIMIT :limit
+            """
+                .replace("__POINT__", POINT)
+                % POI_COLUMNS
+            ),
+            params,
+        )
+    params["radius"] = radius_m
+    return _rows(
+        db,
+        (
+            """
+        WITH cand AS (
+            SELECT %s,
+                   ST_Distance(i.geometry::geography, __POINT__::geography) AS distance_m
+            FROM poi i
+            JOIN parks p ON p.id = i.park_id
+            WHERE ST_DWithin(i.geometry, __POINT__, :deg)
+        )
+        SELECT * FROM cand
+        WHERE distance_m <= :radius
+        ORDER BY distance_m
+        LIMIT :limit
+        """
+            .replace("__POINT__", POINT)
+            % POI_COLUMNS
+        ),
+        params,
     )
 
 

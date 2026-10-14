@@ -29,6 +29,12 @@ export default function App() {
   const [showRoads, setShowRoads] = useState(true);
   const [showDistrict, setShowDistrict] = useState(true);
   const [selectedParkId, setSelectedParkId] = useState<number | null>(null);
+  // Полные данные объекта (карточка): подтягиваются из API при выборе,
+  // чтобы не зависеть от набора полей в GeoJSON-слое.
+  const [selectedParkDetail, setSelectedParkDetail] = useState<{
+    id: number;
+    park: Park | null;
+  } | null>(null);
   const [results, setResults] = useState<{ park: Park; distance_m: number | null }[]>([]);
   const [resultCenter, setResultCenter] = useState<{ latitude: number; longitude: number } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -74,7 +80,15 @@ export default function App() {
 
   const selectPark = useCallback((id: number) => {
     setSelectedParkId(id);
+    setSelectedParkDetail({ id, park: null });
     setView("park");
+    api
+      .park(id)
+      .then((full) =>
+        // ответ применяется, только если объект всё ещё выбран
+        setSelectedParkDetail((cur) => (cur && cur.id === id ? { id, park: full } : cur)),
+      )
+      .catch((e) => console.warn("Не удалось загрузить карточку объекта:", e));
   }, []);
 
   const onResults = useCallback(
@@ -165,10 +179,17 @@ export default function App() {
     [startRouteFlow],
   );
 
-  const selectedPark = useMemo(
-    () => parks.find((p) => p.id === selectedParkId) ?? null,
-    [parks, selectedParkId],
-  );
+  const selectedPark = useMemo(() => {
+    if (selectedParkId == null) return null;
+    if (
+      selectedParkDetail &&
+      selectedParkDetail.id === selectedParkId &&
+      selectedParkDetail.park
+    ) {
+      return selectedParkDetail.park;
+    }
+    return parks.find((p) => p.id === selectedParkId) ?? null;
+  }, [parks, selectedParkId, selectedParkDetail]);
 
   const togglePoiType = (code: string) =>
     setHiddenPoiTypes((prev) => {
@@ -203,6 +224,7 @@ export default function App() {
         onRouteToPark={(park) =>
           startRouteFlow({ lat: park.latitude, lon: park.longitude, name: park.name })
         }
+        onRouteToPoint={onPoiRoute}
       />
       <main className="main">
         <div className="toolbar">
@@ -309,7 +331,7 @@ export default function App() {
                     ? Math.round(route.distance_m) + " м"
                     : (route.distance_m / 1000).toFixed(2) + " км"}
                   {route.duration_s != null && <> · ≈ {Math.max(1, Math.round(route.duration_s / 60))} мин</>}
-                  {route.source === "straight" && <> · по прямой</>}
+                  <> · {route.source === "osrm" ? "дорожная сеть OSRM" : "дорожная сеть Valhalla"}</>
                   {routeDest && <> · до «{routeDest.name}»</>}
                 </span>
                 <button onClick={clearRoute}>Сбросить маршрут</button>

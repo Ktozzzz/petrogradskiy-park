@@ -4,6 +4,7 @@
 Тесты требуют работающую базу данных (scripts/setup_db.py + import_data.py).
 Если база недоступна, тесты пропускаются с пометкой, а не падают.
 """
+import math
 import os
 import sys
 
@@ -36,8 +37,20 @@ def test_health():
     assert "status" in body and "database" in body and "ai" in body
 
 
+def _haversine_m(a, b):
+    """Расстояние между точками [lon, lat] в метрах (для проверок snap)."""
+    lon1, lat1, lon2, lat2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 2 * 6371000.0 * math.asin(math.sqrt(h))
+
+
 def test_route():
-    """Маршрут строится всегда (реальный или по прямой — без внешней сети)."""
+    """Маршрут строится по дорожной сети (Valhalla/OSRM), без линии по воде.
+
+    Если оба роутера недоступны — API возвращает 502, но ни при каких
+    условиях не отдаёт «прямую» линию через воду.
+    """
     r = client.post(
         "/api/route",
         json={
@@ -48,12 +61,58 @@ def test_route():
             "costing": "pedestrian",
         },
     )
+    if r.status_code == 502:
+        detail = r.json()["detail"]
+        assert "прямой" in detail.lower(), "Ошибка должна объяснять отказ от линии по прямой"
+        return
     assert r.status_code == 200
     body = r.json()
     assert body["geometry"]["type"] == "LineString"
     assert len(body["geometry"]["coordinates"]) >= 2
     assert body["distance_m"] > 0
-    assert body["source"] in ("valhalla", "straight")
+    assert body["source"] in ("valhalla", "osrm"), "Маршрут обязан строить роутер дорожной сети"
+
+
+def test_route_snaps_water_start_to_shore():
+    """Точка посреди Невской губы не даёт линию по воде.
+
+    Допустимы два исходa:
+      * HTTP 422 — роутер не смог привязать точку к дорожной сети ближе
+        MAX_SNAP_M (это и есть «точка на воде»);
+      * HTTP 200 — но тогда первая вершина обязана лежать на суше, в пределах
+        разумной привязки, а геометрия — ломаная по сети, не прямая.
+    """
+    start = [30.15, 59.955]   # Невская губа (вода)
+    end = [30.3165, 59.9563]  # центр района
+    r = client.post(
+        "/api/route",
+        json={
+            "start_lat": start[1], "start_lon": start[0],
+            "end_lat": end[1], "end_lon": end[0],
+            "costing": "pedestrian",
+        },
+    )
+    if r.status_code == 502:
+        pytest.skip("Внешние роутеры недоступны (нет сети)")
+
+    if r.status_code == 422:
+        detail = r.json()["detail"]
+        assert "вод" in detail.lower() or "дорожн" in detail.lower(), (
+            "422 должен объяснять, что точка на воде/вне дорожной сети")
+        return
+
+    assert r.status_code == 200
+    body = r.json()
+    coords = body["geometry"]["coordinates"]
+    # 1) первая вершина — точка на берегу, а не исходная точка посреди воды
+    assert _haversine_m(coords[0], start) > 100, (
+        "Старт не привязан к дорожной сети: линия начинается в воде")
+    # 2) привязка в разумных пределах (не на километры в стороне)
+    assert _haversine_m(coords[0], start) < 4000, (
+        "Старт привязан слишком далеко — маршрут строится не от запрошенной точки")
+    # 3) это ломаная по сети, а не две вершины «по прямой»
+    assert len(coords) > 2, "Маршрут не может быть прямой линией через воду"
+    assert body["source"] in ("valhalla", "osrm")
 
 
 def test_openapi_docs():
@@ -141,6 +200,70 @@ def test_search():
     r = client.get("/api/parks/search", params={"q": "Петровский"})
     assert r.status_code == 200
     assert r.json()["total"] >= 1
+
+
+@requires_db
+def test_search_includes_poi():
+    """Поиск выдаёт не только парки/сады/скверы, но и интересные локации."""
+    # объект с точками интереса — ищем по его названию
+    park = client.get("/api/parks", params={"has_poi": True, "limit": 1}).json()["items"][0]
+    r = client.get("/api/parks/search", params={"q": park["name"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert "poi" in body, "Ответ поиска должен содержать список локаций"
+    assert isinstance(body["poi"], list)
+    assert body["total"] >= 1
+    if park.get("poi_count"):
+        assert len(body["poi"]) > 0, "POI объекта должны находиться по его названию"
+        first = body["poi"][0]
+        for key in ("id", "park_id", "poi_type", "poi_type_label", "latitude", "longitude"):
+            assert key in first
+        # локации самого объекта присутствуют в выдаче
+        assert any(x.get("park_name") == park["name"] for x in body["poi"]), (
+            "Среди локаций нет ни одной из объекта %s" % park["name"])
+
+
+@requires_db
+def test_park_detail_fields():
+    """Карточка объекта отдаёт контакты и osm-ссылки для ресурсов."""
+    park_id = client.get("/api/parks").json()["items"][0]["id"]
+    r = client.get("/api/parks/%d" % park_id)
+    assert r.status_code == 200
+    body = r.json()
+    for key in ("phone", "website", "image_url", "year_established",
+                "osm_id", "osm_type", "borough", "themes"):
+        assert key in body, "В карточке нет поля %s" % key
+    # GeoJSON-слой, из которого собирается выбор на карте, обязан содержать темы
+    geo = client.get("/api/parks/geojson", params={"ids": park_id}).json()
+    props = geo["features"][0]["properties"]
+    for key in ("themes", "borough", "keywords"):
+        assert key in props, "В свойствах GeoJSON нет поля %s" % key
+
+
+@requires_db
+def test_park_photos():
+    """Фотографии для карточки (Wikimedia Commons, с кэшем)."""
+    park_id = client.get("/api/parks").json()["items"][0]["id"]
+    r = client.get("/api/parks/%d/photos" % park_id)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["park_id"] == park_id
+    assert isinstance(body["photos"], list)
+    for photo in body["photos"][:3]:
+        assert photo["url"].startswith("https://")
+
+
+@requires_db
+def test_park_photos_unknown_park():
+    r = client.get("/api/parks/999999/photos")
+    assert r.status_code == 404
+
+
+def test_search_response_schema():
+    """Открытая схема поиска документирует блок локаций."""
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/parks/search" in paths
+    assert "/api/parks/{park_id}/photos" in paths
 
 
 @requires_db
@@ -256,6 +379,37 @@ def test_query_radius():
     body = r.json()
     assert body["structured"]["intent"] in ("radius_search", "location_search", "search")
     assert body["count"] >= 1
+
+
+@requires_db
+def test_query_includes_poi(monkeypatch):
+    """Умный запрос возвращает не только объекты, но и интересные локации.
+
+    LLM отключаем, чтобы результат не зависел от внешней модели.
+    """
+    from app.ai import service as ai_service
+
+    class _NoLLM:
+        def available(self):
+            return False
+
+        def parse_query(self, _text):
+            return None
+
+    monkeypatch.setattr(ai_service, "get_llm_client", lambda: _NoLLM())
+
+    r = client.post(
+        "/api/query",
+        json={"text": "Покажи скверы в радиусе 1 км от Чкаловского проспекта"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["poi"], list), "Ответ запроса должен содержать блок poi"
+    if body["structured"]["intent"] == "radius_search":
+        assert len(body["poi"]) > 0, "В радиусе должны найтись интересные локации"
+        first = body["poi"][0]
+        assert first["poi_type_label"]
+        assert first.get("park_name"), "POI должен знать, в каком объекте находится"
 
 
 @requires_db

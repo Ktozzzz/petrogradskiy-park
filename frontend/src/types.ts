@@ -14,6 +14,9 @@ export interface Park {
   is_free?: boolean | null;
   working_hours?: string | null;
   website?: string | null;
+  phone?: string | null;
+  image_url?: string | null;
+  year_established?: number | null;
   metro_stations: string[];
   facilities: string[];
   themes: string[];
@@ -24,6 +27,8 @@ export interface Park {
   poi_count: number;
   road_count: number;
   exit_count: number;
+  osm_id?: number | null;
+  osm_type?: string | null;
   source: string;
 }
 
@@ -83,8 +88,28 @@ export interface PoiItem {
   color?: string;
   name?: string | null;
   description?: string | null;
+  park_name?: string | null;
   latitude: number;
   longitude: number;
+  distance_m?: number | null;
+}
+
+export interface ParkPhoto {
+  url: string;
+  title?: string | null;
+  page?: string | null;
+}
+
+export interface ParkPhotosResponse {
+  park_id: number;
+  park_name: string;
+  photos: ParkPhoto[];
+}
+
+export interface SearchResponse {
+  total: number;
+  items: Park[];
+  poi: PoiItem[];
 }
 
 export interface RoadItem {
@@ -251,5 +276,6 @@ export interface RouteResponse {
   geometry: { type: "LineString"; coordinates: [number, number][] };
   distance_m: number;
   duration_s: number | null;
-  source: "valhalla" | "straight";
+  /** Роутер, построивший путь по дорожной сети (Valhalla либо OSRM). */
+  source: "valhalla" | "osrm";
 }
