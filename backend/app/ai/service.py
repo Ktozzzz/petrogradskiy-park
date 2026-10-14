@@ -359,6 +359,14 @@ def execute(db, structured, user_text, latitude=None, longitude=None, warnings=N
                     poi_type=structured.poi_type,
                 ),
             )
+            # В радиусе может не оказаться мест запрошенного типа: центр
+            # оказался вне района («Екатерининский парк» в Пушкине) либо рядом
+            # с маленьким сквером нет кафе в километре. Тогда берём ближайшие
+            # места этого типа по всему району — ответ на «где поесть»
+            # не должен быть пустым.
+            if structured.poi_type and not response["poi"]:
+                _add_poi(response, lambda: spatial.poi_near(
+                    db, lat, lon, None, poi_type=structured.poi_type))
         elif structured.poi_type:
             _add_poi(response, lambda: spatial.poi_by_type(
                 db, structured.poi_type, limit=20))

@@ -546,6 +546,26 @@ def test_query_cafe_near_unresolved_park(monkeypatch):
 
 
 @requires_db
+def test_query_food_radius_empty_falls_back_to_nearest(monkeypatch):
+    """Вокруг точки отсчёта нет мест этого типа — берутся ближайшие по району.
+
+    У Лопухинского сада ближайшее место питания дальше километра, а центр
+    может вообще оказаться вне района — в обоих случаях ответ на «где поесть»
+    обязан содержать места питания, а не быть пустым.
+    """
+    _force_rules(client, monkeypatch)
+    r = client.post(
+        "/api/query",
+        json={"text": "Где поесть возле Лопухинского сада"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["structured"].get("poi_type") == "food"
+    assert len(body["poi"]) > 0, "Пустой список кафе недопустим — ближайшие должны найтись"
+    assert all(x["poi_type"] == "food" for x in body["poi"])
+
+
+@requires_db
 def test_query_validation():
     """Слишком короткий запрос отклоняется схемой."""
     r = client.post("/api/query", json={"text": "а"})
